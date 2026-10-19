@@ -143,6 +143,8 @@ class ComteOverlay:
         self.render_scaled_grid(self.last_w, self.last_h)
 
     def set_confusion(self, angle):
+        if self.base_angle == angle:
+            return
         self.base_angle = angle
         self.calculate_resolution()
         

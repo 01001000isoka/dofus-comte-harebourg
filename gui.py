@@ -6,6 +6,7 @@ import time
 import win32api
 import win32con
 import os
+import health_ocr
 
 AZERTY_TO_SCAN = {
     'a': 16, 'z': 17, 'e': 18, 'r': 19, 't': 20, 'y': 21, 'u': 22, 'i': 23, 'o': 24, 'p': 25,
@@ -74,6 +75,8 @@ class ComteControlPanel:
         self.hotkey_btns = {}
         self.show_grid_var = tk.BooleanVar(value=False)
         self.calib_entries = {}
+        self.health_region = self._validated_health_region(config.get("health_region"))
+        self.health_reader_stop = None
         
         self.build_combat_page()
         self.build_config_page()
@@ -119,13 +122,72 @@ class ComteControlPanel:
             {"id": 5, "text": "29% à 0%", "angle": 270, "color": "#c0392b"}
         ]
         self.btn_widgets = []
-        for data in self.buttons_data:
-            btn = tk.Label(self.page_combat, text=data["text"], font=("Segoe UI", 9, "bold"), 
-                           bg="#2D2D2D", fg=data["color"], pady=5, cursor="hand2")
-            btn.pack(fill=tk.X, padx=15, pady=3)
-            btn.bind("<Button-1>", lambda e, d=data: self.on_button_click(d["id"], d["angle"]))
-            self.btn_widgets.append({"widget": btn, "id": data["id"], "default_color": data["color"]})
         self.active_btn_id = None
+
+        frame_health = tk.Frame(self.page_combat, bg="#151515", bd=1, relief="sunken")
+        frame_health.pack(fill=tk.X, padx=15, pady=8)
+        tk.Label(
+            frame_health, text="Santé actuelle (OCR)", bg="#151515", fg="#00FFFF",
+            font=("Segoe UI", 9, "bold")
+        ).pack(pady=(5, 2))
+
+        self.lbl_health = tk.Label(
+            frame_health, text="—", bg="#151515", fg="white",
+            font=("Segoe UI", 16, "bold")
+        )
+        self.lbl_health.pack()
+        self.lbl_health_phase = tk.Label(
+            frame_health, text="Palier : —", bg="#151515", fg="#AAAAAA",
+            font=("Segoe UI", 8)
+        )
+        self.lbl_health_phase.pack(pady=(0, 4))
+
+        self.lbl_health_region = tk.Label(
+            frame_health, text=self._health_region_description(), bg="#151515",
+            fg="#AAAAAA", font=("Segoe UI", 7), wraplength=210
+        )
+        self.lbl_health_region.pack(pady=2)
+
+        btn_select_health = tk.Label(
+            frame_health, text="SÉLECTIONNER LA ZONE DU %", bg="#2D2D2D",
+            fg="white", font=("Segoe UI", 8, "bold"), pady=5, cursor="hand2"
+        )
+        btn_select_health.pack(fill=tk.X, padx=8, pady=3)
+        btn_select_health.bind("<Button-1>", lambda e: self.select_health_region())
+
+        self.btn_health_reader = tk.Label(
+            frame_health, text="DÉMARRER LA LECTURE", bg="#27ae60",
+            fg="white", font=("Segoe UI", 8, "bold"), pady=5, cursor="hand2"
+        )
+        self.btn_health_reader.pack(fill=tk.X, padx=8, pady=(2, 5))
+        self.btn_health_reader.bind("<Button-1>", lambda e: self.toggle_health_reader())
+
+        self.lbl_health_status = tk.Label(
+            frame_health, text="Sélectionnez la zone du pourcentage.", bg="#151515",
+            fg="#AAAAAA", font=("Segoe UI", 7), wraplength=210
+        )
+        self.lbl_health_status.pack(pady=(0, 5))
+
+        tk.Label(
+            self.page_combat, text="OU CHOISIR LE PALIER MANUELLEMENT",
+            bg="#1E1E1E", fg="#AAAAAA", font=("Segoe UI", 7, "bold")
+        ).pack(pady=(2, 0))
+
+        frame_manual_phases = tk.Frame(self.page_combat, bg="#1E1E1E")
+        frame_manual_phases.pack(fill=tk.X, padx=12, pady=(2, 4))
+        for index, data in enumerate(self.buttons_data):
+            btn = tk.Label(
+                frame_manual_phases, text=data["text"], font=("Segoe UI", 7, "bold"),
+                bg="#2D2D2D", fg=data["color"], pady=4, cursor="hand2",
+                width=16, wraplength=105
+            )
+            btn.grid(row=index // 2, column=index % 2, sticky="ew", padx=2, pady=2)
+            btn.bind("<Button-1>", lambda e, d=data: self.select_phase_manually(d))
+            self.btn_widgets.append(
+                {"widget": btn, "id": data["id"], "default_color": data["color"]}
+            )
+        frame_manual_phases.grid_columnconfigure(0, weight=1)
+        frame_manual_phases.grid_columnconfigure(1, weight=1)
 
         frame_cac = tk.Frame(self.page_combat, bg="#151515", bd=1, relief="sunken")
         frame_cac.pack(fill=tk.X, padx=15, pady=10)
@@ -326,12 +388,172 @@ class ComteControlPanel:
                 self.root.after(0, lambda d=data: self.on_button_click(d["id"], d["angle"]))
                 break
 
+    def select_phase_manually(self, phase):
+        if self.health_reader_stop:
+            self._stop_health_reader()
+        self.lbl_health.config(text="Manuel")
+        self.lbl_health_status.config(text="Palier choisi manuellement.", fg="#AAAAAA")
+        self.on_button_click(phase["id"], phase["angle"])
+
     def on_button_click(self, btn_id, angle):
         self.active_btn_id = btn_id
         self.set_confusion_callback(angle)
+        for data in self.buttons_data:
+            if data["id"] == btn_id:
+                self.lbl_health_phase.config(text=f"Palier : {data['text']}")
+                break
         for btn_dict in self.btn_widgets:
             w, b_id = btn_dict["widget"], btn_dict["id"]
             if b_id == self.active_btn_id:
                 w.config(bg="#00FFFF", fg="black")
             else:
                 w.config(bg="#2D2D2D", fg=btn_dict["default_color"])
+
+    @staticmethod
+    def _validated_health_region(region):
+        if not isinstance(region, (list, tuple)) or len(region) != 4:
+            return None
+        if not all(isinstance(value, int) for value in region):
+            return None
+        left, top, right, bottom = region
+        return list(region) if right > left and bottom > top else None
+
+    def _health_region_description(self):
+        if not self.health_region:
+            return "Zone de lecture non définie"
+        left, top, right, bottom = self.health_region
+        return f"Zone sélectionnée ({right - left} × {bottom - top})"
+
+    def select_health_region(self):
+        if self.health_reader_stop:
+            self._stop_health_reader()
+
+        self.root.withdraw()
+        selector = tk.Toplevel(self.root)
+        selector.overrideredirect(True)
+        selector.attributes("-topmost", True)
+        selector.attributes("-alpha", 0.25)
+        selector.configure(bg="black", cursor="crosshair")
+        screen_left = win32api.GetSystemMetrics(win32con.SM_XVIRTUALSCREEN)
+        screen_top = win32api.GetSystemMetrics(win32con.SM_YVIRTUALSCREEN)
+        screen_width = win32api.GetSystemMetrics(win32con.SM_CXVIRTUALSCREEN)
+        screen_height = win32api.GetSystemMetrics(win32con.SM_CYVIRTUALSCREEN)
+        selector.geometry(
+            f"{screen_width}x{screen_height}{screen_left:+d}{screen_top:+d}"
+        )
+
+        canvas = tk.Canvas(selector, bg="black", highlightthickness=0, cursor="crosshair")
+        canvas.pack(fill=tk.BOTH, expand=True)
+        canvas.create_text(
+            screen_width // 2, 35,
+            text="Faites glisser pour sélectionner le pourcentage de santé (Échap pour annuler)",
+            fill="white", font=("Segoe UI", 14, "bold")
+        )
+        selection = {}
+
+        def start_selection(event):
+            selection["start"] = (event.x_root, event.y_root)
+            selection["rectangle"] = canvas.create_rectangle(
+                event.x_root - screen_left, event.y_root - screen_top,
+                event.x_root - screen_left, event.y_root - screen_top,
+                outline="#00FFFF", width=2
+            )
+
+        def update_selection(event):
+            if "rectangle" in selection:
+                x1, y1 = selection["start"]
+                canvas.coords(
+                    selection["rectangle"],
+                    x1 - screen_left, y1 - screen_top,
+                    event.x_root - screen_left, event.y_root - screen_top
+                )
+
+        def finish_selection(event):
+            if "start" not in selection:
+                return
+            x1, y1 = selection["start"]
+            region = [min(x1, event.x_root), min(y1, event.y_root),
+                      max(x1, event.x_root), max(y1, event.y_root)]
+            selector.destroy()
+            self.root.deiconify()
+            self.root.lift()
+            if self._validated_health_region(region):
+                self.health_region = region
+                self.config["health_region"] = region
+                self.save_callback(self.config)
+                self.lbl_health_region.config(text=self._health_region_description())
+                self.lbl_health_status.config(text="Zone enregistrée. Démarrez la lecture.")
+            else:
+                self.lbl_health_status.config(text="Sélection trop petite. Réessayez.")
+
+        def cancel_selection(event=None):
+            if selector.winfo_exists():
+                selector.destroy()
+            self.root.deiconify()
+            self.root.lift()
+
+        canvas.bind("<ButtonPress-1>", start_selection)
+        canvas.bind("<B1-Motion>", update_selection)
+        canvas.bind("<ButtonRelease-1>", finish_selection)
+        selector.bind("<Escape>", cancel_selection)
+        selector.focus_force()
+
+    def toggle_health_reader(self):
+        if self.health_reader_stop:
+            self._stop_health_reader()
+            return
+        if not self.health_region:
+            self.lbl_health_status.config(text="Sélectionnez d'abord la zone du pourcentage.")
+            return
+
+        try:
+            health_ocr.find_tesseract()
+        except FileNotFoundError as error:
+            self.lbl_health_status.config(text=str(error), fg="#e74c3c")
+            return
+
+        self.health_reader_stop = threading.Event()
+        self.btn_health_reader.config(text="ARRÊTER LA LECTURE", bg="#c0392b")
+        self.lbl_health_status.config(
+            text="Lecture active. Gardez la zone visible et non masquée.", fg="#AAAAAA"
+        )
+        threading.Thread(
+            target=self._health_reader_loop,
+            args=(self.health_reader_stop, tuple(self.health_region)),
+            daemon=True
+        ).start()
+
+    def _health_reader_loop(self, stop_event, region):
+        while not stop_event.is_set():
+            try:
+                percent = health_ocr.read_health_percent(region)
+            except Exception as error:
+                self.root.after(0, self._health_reader_failed, stop_event, str(error))
+                return
+            if percent is not None:
+                self.root.after(0, self._apply_health_reading, stop_event, percent)
+            stop_event.wait(0.25)
+
+    def _apply_health_reading(self, stop_event, percent):
+        if self.health_reader_stop is not stop_event or stop_event.is_set():
+            return
+        self.lbl_health.config(text=f"{percent}%")
+        phase_id, angle = health_ocr.phase_for_percent(percent)
+
+        if self.active_btn_id != phase_id:
+            self.on_button_click(phase_id, angle)
+        else:
+            self.set_confusion_callback(angle)
+        self.lbl_health_status.config(text="Lecture active", fg="#AAAAAA")
+
+    def _health_reader_failed(self, stop_event, error):
+        if self.health_reader_stop is not stop_event:
+            return
+        self._stop_health_reader()
+        self.lbl_health_status.config(text=f"Erreur OCR : {error}", fg="#e74c3c")
+
+    def _stop_health_reader(self):
+        self.health_reader_stop.set()
+        self.health_reader_stop = None
+        self.btn_health_reader.config(text="DÉMARRER LA LECTURE", bg="#27ae60")
+        self.lbl_health_status.config(text="Lecture arrêtée.", fg="#AAAAAA")

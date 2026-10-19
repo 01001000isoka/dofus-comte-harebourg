@@ -13,7 +13,8 @@ DEFAULT_CONFIG = {
     "hotkey_360": "ctrl+4",
     "ping_target": "ctrl+left",
     "ping_player": "ctrl+right",
-    "hotkey_reset": ""
+    "hotkey_reset": "",
+    "health_region": None
 }
 
 def load_config():
